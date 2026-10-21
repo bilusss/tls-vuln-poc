@@ -1,9 +1,7 @@
-# Status projektu: TLS Vulnerabilities PoC (Secure Communications Systems, Meeting #1)
+# Status projektu: TLS Vulnerabilities PoC (Meeting #1)
 
-Projekt na przedmiot "Secure Communications Systems 2026-27", temat "TLS
-Vulnerabilities" (Piotr Pacyna, zespół: Łukasz Bilski, Mateusz Wątor, Przemysław Bryzek).
 Pierwsza konsultacja (Proof of Concept): 2026-10-21. Prezentacja gotowa:
-`/Users/bilus/Downloads/TLS-Vulnerabilities-Meeting-1-PoC.pptx` (8 slajdów, treść OK,
+`docs/TLS-Vulnerabilities-Meeting-1-PoC.pptx` (8 slajdów, treść OK,
 patrz "Uwaga do slajdów" poniżej).
 
 Trzy CVE do zademonstrowania w Dockerze, wersja podatna vs. załatana, oba na 127.0.0.1:

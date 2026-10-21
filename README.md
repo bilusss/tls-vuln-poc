@@ -1,8 +1,5 @@
 # TLS Vulnerabilities PoC
 
-Secure Communications Systems 2026-27. Piotr Pacyna. Łukasz Bilski, Mateusz Wątor,
-Przemysław Bryzek.
-
 Reproduces three recent, already patched TLS CVEs: one vulnerable and one patched
 instance of each, side by side, fully in Docker on `127.0.0.1`. Nothing touches an
 external network.
@@ -13,9 +10,7 @@ external network.
 | CVE-2024-37309 | CrateDB | CPU DoS via client-initiated TLS renegotiation | 5.7.2 |
 | CVE-2025-66491 | Traefik | inverted `proxy-ssl-verify` leaves backend cert check disabled (MITM) | 3.6.3 |
 
-See `STATUS.md` for the current build/debug status of each lab, and
-`docs/TLS-Vulnerabilities-Meeting-1-PoC.pptx` for the Meeting 1 slides (the Traefik
-CVSS score was corrected from 8.2 to the verified 5.9).
+See `STATUS.md` for the current build/debug status of each lab.
 
 ## Requirements
 - Docker + Docker Compose
@@ -55,6 +50,6 @@ Not built yet. Needs a local k3d cluster. See `STATUS.md`.
 ## Why this is safe to share / run anywhere
 Every container binds only to `127.0.0.1`, so nothing is reachable from the network.
 All three CVEs are old, public, and already patched upstream, so this reproduces known,
-published behaviour for a university course rather than a novel exploit. Certificates
-are throwaway lab material generated locally by `common/gen-certs.sh` and are not
-committed to git (see `.gitignore`); each clone regenerates its own.
+published behaviour rather than a novel exploit. Certificates are throwaway lab material
+generated locally by `common/gen-certs.sh` and are not committed to git (see
+`.gitignore`); each clone regenerates its own.
