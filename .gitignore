@@ -1,0 +1,6 @@
+# Generated secrets/certs - everyone regenerates their own via common/gen-certs.sh
+certs/
+*.jks
+*.p12
+*.key
+*.srl
