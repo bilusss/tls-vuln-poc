@@ -48,82 +48,49 @@ GHSA-7vww-mvcr-x6vj) podają CVSS 5.9. Do poprawienia w prezentacji przed spotka
 
 ## Status per CVE
 
-### 1. CVE-2025-23419 (nginx): środowisko działa, dokładny bypass jeszcze nie odtworzony
+### 1. CVE-2025-23419 (nginx): działa end to end, bypass odtworzony
 
-Infrastruktura działa: `docker compose up -d` w `cve-2025-23419-nginx/` stawia oba
-kontenery (`cve-23419-vuln` na 8443, `cve-23419-patched` na 9443), oba przyjmują TLS.
+Root cause znaleziony przez czytanie realnego kodu nginx (nie zgadywanie):
+`ngx_http_process_request()` w `src/http/ngx_http_request.c` czyta
+`SSL_get_peer_certificate(c->ssl->connection)`. Na WZNOWIONEJ (abbreviated TLSv1.3)
+sesji żaden nowy Certificate message nie jest wymieniany — OpenSSL po stronie serwera
+po prostu zwraca certyfikat i wynik weryfikacji **zcache'owany z oryginalnego,
+pełnego handshake'u**. Nginx nie re-weryfikuje tego certu wobec CA listy nowo
+wybranego (po SNI) server blocku.
 
-Aktualna konfiguracja `nginx.conf` (druga wersja, poprawiona pod realne preconditions
-z advisory, ale bypass mimo to jeszcze nie przechodzi):
-- `secure.local` to default_server, `ssl_verify_client on` (wymaga certu klienta).
-- `public.local` to zwykły named vhost, bez wymogu certu.
-- `ssl_protocols TLSv1.3;` jest wymagane: advisory nginx mówi wyraźnie, że bug dotyczy
-  TLSv1.3, nie TLSv1.2. Pierwsza wersja configu używała TLSv1.2 i to był błąd.
-- `ssl_session_tickets on;` plus `ssl_session_cache shared:SSL:10m;`.
+Pierwsza wersja configu (public.local bez wymogu certu wcale) była ślepym zaułkiem:
+`SSL_get_peer_certificate` zwracał po prostu NULL (zawsze, bo nic nie było do
+zcache'owania), więc oba build'y (podatny i załatany) dawały identyczny wynik
+(`400 No required SSL certificate was sent`) — to NIE testowało rzeczywistego bugu.
 
-Dokładny mechanizm bugu, zweryfikowany z realnego fix commitu nginx (hash 13935cf,
-"SNI: added restriction for TLSv1.3 cross-SNI session resumption"):
-- Fix dodaje w `ngx_http_ssl_servername()` sprawdzenie: jeśli `ssl_verify_client` jest
-  włączone dla server blocku wybranego przez SNI, nginx odczytuje hostname zapisany
-  w wznawianej sesji (`SSL_SESSION_get0_hostname()`), i jeśli różni się od aktualnie
-  żądanego SNI, handshake jest odrzucany (`handshake_rejected=1`, `SSL_AD_ACCESS_DENIED`).
-- W wersji przed fixem to porównanie nie istnieje, więc teoretycznie nic nie blokuje
-  wznowienia sesji otwartej pod SNI=public.local (bez certu) z nowym żądaniem o
-  SNI=secure.local (z certem).
-- Precondition z Red Hat / GitHub advisory GHSA-84xh-pwc6-7g4g: default server musi
-  wymagać client-cert auth, stąd `secure.local` jako default_server w configu.
-- Ważny szczegół z komentarza w commicie: przy TLSv1.3 OpenSSL wznawia sesję w domyślnym
-  kontekście SSL przed wywołaniem callbacka SNI, czyli resumption dzieje się przed
-  wyborem kontekstu po SNI.
+Właściwy scenariusz wymaga DWÓCH różnych CA:
+- `public.local` (named vhost): `ssl_client_certificate ca.crt` (CA-A).
+- `secure.local` (default_server): `ssl_client_certificate ca2.crt` (CA-B, INNE CA).
+- Atakujący ma cert podpisany przez CA-A (`client.crt`/`client.key`).
 
-Co już wypróbowane i nie zadziałało (ciągle 400 lub 421, na obu wersjach):
-1. Pierwsza, błędna wersja configu: TLSv1.2, `public.local` jako default_server bez
-   certu, `secure.local` jako named vhost z certem, resume z `-servername secure.local`.
-   Wynik: `421 Misdirected Request` na obu wersjach. To inny, starszy mechanizm nginx,
-   ochrona przed HTTP/2 connection coalescing z 2016, niezwiązany z tym CVE (zmiana
-   changeset 6556 autorstwa Valentina Bartenev, "closes #848").
-2. Po poprawce (TLSv1.3, `secure.local` jako default_server z certem, `public.local`
-   jako named bez certu): resume bez SNI (`-servername` całkiem pominięte). Wynik:
-   `400 No required SSL certificate was sent` na wersji podatnej (8443). Bez SNI nginx
-   i tak wymusza weryfikację certu na default_server, prawdopodobnie bo bez SNI nie
-   wywołuje się callback `ngx_http_ssl_servername`, więc używany jest domyślny SSL_CTX,
-   który już ma `verify_client on` ustawione na starcie dla tego listen socketu.
-3. Resume z explicit `-servername secure.local` (różne od oryginalnego SNI=public.local
-   użytego przy tworzeniu sesji). Wynik: też `400 No required SSL certificate was sent`,
-   na wersji podatnej (8443). Czyli nawet w scenariuszu teoretycznie dokładnie
-   odpowiadającym opisowi z fix commitu, bypass nie udał się przez plain
-   `openssl s_client -sess_in/-sess_out`.
+Atak: zaloguj się normalnie na `public.local` certem CA-A (sukces, bo CA-A tam
+zaufane), zapisz sesję, wznów ją żądając `secure.local` BEZ podawania żadnego certu.
 
-Hipoteza czemu (3) nie działa, do zweryfikowania w następnej sesji:
-- Możliwe, że `ssl_verify_client on` razem z `SSL_VERIFY_FAIL_IF_NO_PEER_CERT` w
-  OpenSSL wymusza błąd "no peer cert" na poziomie post-handshake niezależnie od tego,
-  czy nginx-owy bug w SNI routing pozwolił requestowi przejść. Czyli błąd 400 może być
-  generowany przez samo OpenSSL/nginx na podstawie faktycznej nieobecności certu
-  klienta w handshake, a nie przez dodatkowy check z fix commitu. W takim razie realny
-  bypass wymagałby czegoś subtelniejszego niż `s_client -sess_in`, na przykład:
-  - `ssl_verify_client optional` plus własny check w `location`
-    (`if ($ssl_client_verify != SUCCESS) return 403;`), żeby zobaczyć różnicę między
-    "handshake succeeded mimo braku certu" i "HTTP layer check go złapał";
-  - TLS 1.3 session ticket (PSK) resumption z explicit `early_data` / 0-RTT, bo to
-    może iść inną ścieżką kodu;
-  - sprawdzenie dokładnej wersji OpenSSL w obrazie (`docker exec cve-23419-vuln
-    nginx -V`), bo obraz bazowy może mieć OpenSSL już spatchowany niezależnie od
-    wersji nginx;
-  - mini-klient TLS w Pythonie (moduł `ssl`, `SSLContext.wrap_socket` z `session=`
-    z poprzedniego połączenia) zamiast `openssl s_client`, bo s_client może się
-    zachowywać nietypowo przy 0-RTT/PSK;
-  - sprawdzenie logów nginx podczas ataku (`docker logs cve-23419-vuln`), żeby
-    zobaczyć na jakim etapie żądanie zostaje odrzucone.
-- Publiczne repo PoC `harley-ghostie/safe-check-CVE-2025-23419` okazało się
-  heurystycznym skanerem (sprawdza Server header, obecność mTLS i tak dalej), nie
-  realnym exploitem. Nie dało konkretnej recepty na sam atak.
+Wynik:
+- Podatna (1.27.3): `SECURE reached ... verify=SUCCESS` — cert zaufany tylko przez
+  CA-A został zaakceptowany na vhoście, który ufa wyłącznie CA-B. Bypass potwierdzony.
+- Załatana (1.27.4): `tlsv1 alert access denied` (SSL alert 49) — to dosłownie
+  `SSL_AD_ACCESS_DENIED` z fix commitu nginx (hash `13935cf`, "SNI: added restriction
+  for TLSv1.3 cross-SNI session resumption"), `New, TLSv1.3` (nie `Reused`, czyli
+  handshake faktycznie odrzucony na poziomie TLS, nie HTTP).
 
-Komenda do podniesienia środowiska od zera:
+Fix dodaje w `ngx_http_ssl_servername()`: jeśli `ssl_verify_client` jest włączone dla
+server blocku wybranego przez SNI, nginx porównuje hostname zapisany w wznawianej
+sesji (`SSL_SESSION_get0_hostname()`) z aktualnie żądanym SNI, i przy niezgodności
+odrzuca handshake. Zablokowane dawno, błędne podejścia po drodze (TLSv1.2 zamiast
+TLSv1.3, resume bez SNI, jeden-CA scenariusz) opisane w historii commitów repo, nie
+trzeba ich powtarzać.
+
 ```bash
 cd ~/tls-vuln-poc/cve-2025-23419-nginx
 docker compose up -d
-./run-poc.sh 8443   # atak na podatną wersję
-./run-poc.sh 9443   # to samo na załatanej, powinno się nie udać
+./run-poc.sh 8443   # podatna: STEP 4 -> "SECURE reached ... verify=SUCCESS"
+./run-poc.sh 9443   # załatana: STEP 4 -> "tlsv1 alert access denied"
 ```
 
 ### 2. CVE-2024-37309 (CrateDB): działa end to end, efekt widoczny na CPU
@@ -190,10 +157,8 @@ Stawia (albo reużywa) wszystkie środowiska i odpala wszystkie trzy PoC po kole
 z czytelnymi nagłówkami. Bezpieczne do wielokrotnego odpalania.
 
 ## Następne kroki, w kolejności
-1. Dokończyć CVE-2025-23419: zdebugować dlaczego bypass się nie reprodukuje mimo
-   configu zgodnego z preconditions (patrz hipotezy wyżej). To jedyny z trzech,
-   który jeszcze nie daje efektu "podatna = przechodzi, załatana = blokuje".
-2. Zrobić screenshoty/output z każdego demo na potrzeby raportu.
+Wszystkie trzy PoC działają end to end (podatna przechodzi, załatana blokuje).
+Zostało: zrobić screenshoty/output z każdego demo na potrzeby raportu.
 
 ## Decyzja użytkownika z 2026-10-21
 Zapytany, jak kontynuować przy zablokowanym PoC nginx, użytkownik wybrał dalsze

@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Generate a tiny PKI shared by the PoCs:
-#   ca.crt / ca.key      - our own Certificate Authority
+#   ca.crt / ca.key      - our own Certificate Authority ("CA-A")
+#   ca2.crt / ca2.key    - a SECOND, independent CA ("CA-B") - used by the nginx lab
+#                          as a DIFFERENT trust anchor for a different vhost, to show
+#                          a cert valid under CA-A getting wrongly accepted by a vhost
+#                          that only trusts CA-B, via TLS session resumption.
 #   server.crt/.key      - server cert, SAN covers public.local + secure.local + localhost
-#   client.crt/.key      - client cert signed by our CA (for the nginx mTLS demo)
+#   client.crt/.key      - client cert signed by our CA (CA-A) (for the nginx mTLS demo)
 #   untrusted.crt/.key    - self-signed cert NOT signed by our CA (for the Traefik MITM demo)
 #
 # Everything is throwaway lab material. Do not reuse outside this testbed.
@@ -18,6 +22,11 @@ echo "[*] Writing certs into: $OUT"
 openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
   -keyout ca.key -out ca.crt \
   -subj "/CN=TLS-PoC Lab CA" 2>/dev/null
+
+# --- A second, independent CA (CA-B) ----------------------------------------
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout ca2.key -out ca2.crt \
+  -subj "/CN=TLS-PoC Lab CA-2" 2>/dev/null
 
 # --- Server cert (signed by CA), SAN = the two vhosts + localhost ------------
 openssl req -newkey rsa:2048 -nodes \
