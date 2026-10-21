@@ -28,17 +28,22 @@ GHSA-7vww-mvcr-x6vj) podają CVSS 5.9. Do poprawienia w prezentacji przed spotka
 ## Struktura repo
 ```
 ~/tls-vuln-poc/
-  common/gen-certs.sh              generator mini-PKI (CA, server, client, untrusted certy)
+  demo.sh                           odpala wszystkie trzy PoC jedną komendą
+  common/gen-certs.sh               generator mini-PKI (CA, server, client, untrusted certy)
   cve-2025-23419-nginx/
-    nginx.conf                     config z dwoma vhostami na jednym porcie
-    docker-compose.yml             nginx:1.27.3 (vuln, port 8443) + nginx:1.27.4 (patched, port 9443)
-    certs/                         wygenerowane przez gen-certs.sh, nie commitowane do git
-    run-poc.sh                     skrypt atakujący (openssl s_client)
+    nginx.conf                      config z dwoma vhostami na jednym porcie
+    docker-compose.yml              nginx:1.27.3 (vuln, port 8443) + nginx:1.27.4 (patched, port 9443)
+    certs/                          wygenerowane przez gen-certs.sh, nie commitowane do git
+    run-poc.sh                      skrypt atakujący (openssl s_client)
   cve-2024-37309-cratedb/
-    crate.yml                      konfiguracja TLS na porcie 4200 (HTTP)
-    docker-compose.yml             crate:5.7.1 (vuln, port 4200) + crate:5.7.2 (patched, port 4201)
-    certs/                         jak wyżej, plus keystore.jks (nie commitowany)
-  cve-2025-66491-traefik/          pusty, nie zaczęty
+    crate.yml                       konfiguracja TLS na porcie 4200 (HTTP)
+    docker-compose.yml              crate:5.7.1 (vuln, port 4200) + crate:5.7.2 (patched, port 4201)
+    certs/                          jak wyżej, plus keystore.jks (nie commitowany)
+    run-poc.sh                      pętla renegocjacji + pomiar CPU kontenera
+  cve-2025-66491-traefik/
+    manifests/                      namespace, backend HTTPS, RBAC, 2x Traefik, IngressClass+Ingress
+    certs/                          jak wyżej
+    run-poc.sh                      tworzy/reużywa klaster k3d, apply, port-forward, curl na obie wersje
 ```
 
 ## Status per CVE
@@ -121,45 +126,74 @@ docker compose up -d
 ./run-poc.sh 9443   # to samo na załatanej, powinno się nie udać
 ```
 
-### 2. CVE-2024-37309 (CrateDB): środowisko działa
+### 2. CVE-2024-37309 (CrateDB): działa end to end, efekt widoczny na CPU
 
-Zbudowane i działające. Keystore JKS zrobiony z naszego PKI (openssl pkcs12 + keytool),
-zamontowany do obu kontenerów przez `crate.yml` (`ssl.http.enabled: true`).
-`docker compose up -d` w `cve-2024-37309-cratedb/` stawia:
-- `cve-37309-vuln`: crate:5.7.1, port 4200, w logach "HTTP SSL support is enabled".
-- `cve-37309-patched`: crate:5.7.2, port 4201.
+Zbudowane i przetestowane. Keystore JKS zrobiony z naszego PKI (openssl pkcs12 +
+keytool), zamontowany do obu kontenerów przez `crate.yml` (`ssl.http.enabled: true`).
+Ważna poprawka: oba kontenery potrzebują `-Cnetwork.host=0.0.0.0` w `docker-compose.yml`
+(komenda startowa), bo CrateDB domyślnie wiąże się tylko na `127.0.0.1`/`::1` wewnątrz
+kontenera (ustawienie Elasticsearch-owe "_local_"), co z userland-proxy Dockera na
+macOS powodowało, że handshake TLS nigdy się nie kończył (serwer zrywał połączenie po
+ClientHello, bez żadnego ServerHello, bez logu po stronie serwera).
 
-Fix wyłącza client-initiated renegotiation domyślnie (5.7.2). Workaround dla starszych
-wersji: JVM flag `-Djdk.tls.rejectClientInitiatedRenegotiation=true`.
+`run-poc.sh [container] [port]` otwiera jedną sesję TLS 1.2 (z flagami
+`-legacy_renegotiation -legacy_server_connect`, bo nowoczesny OpenSSL domyślnie
+odmawia inicjować renegocjację bez tych flag) i strzela 100 renegocjacjami w pętli,
+mierząc CPU kontenera przez `docker stats` co sekundę.
 
-Do zrobienia: sam skrypt demo ataku, czyli `openssl s_client -connect 127.0.0.1:4200
--tls1_2` plus wysyłanie `R` (renegotiate) w pętli, z obserwacją CPU kontenera przez
-`docker stats`. Opisane na slajdzie 6 jako plan eksperymentu.
+Zmierzone wyniki:
+- `cve-37309-vuln` (5.7.1, port 4200): 100/100 renegocjacji przyjęte, CPU
+  skacze z ~0.5% do 17-38% w trakcie ataku.
+- `cve-37309-patched` (5.7.2, port 4201): serwer odrzuca pierwszą renegocjację
+  alertem `handshake failure`, CPU zostaje płaskie (~0.3-1%).
 
-### 3. CVE-2025-66491 (Traefik): nie zaczęte
+Czysty, przekonujący kontrast przed/po.
 
-Plan, z advisory GHSA-7vww-mvcr-x6vj:
-- Bug w ingress-nginx provider Traefika: `proxy-ssl-verify: "on"` ustawia
-  `InsecureSkipVerify = true`, czyli odwrotna logika. Fix: 3.6.3 (affected
-  3.5.0 do 3.6.2). CWE-295, CVSS 5.9 (nie 8.2, patrz uwaga do slajdów wyżej).
-- Wymaga k3d/kind, lokalny k8s. k3d trzeba doinstalować (`brew install k3d`).
-- Lab: mały klaster k3d, Traefik jako ingress controller w wersji 3.6.2 (vuln) i
-  3.6.3 (patched), HTTPS backend z certyfikatem `untrusted.crt`/`untrusted.key`
-  (już wygenerowanym w `common/gen-certs.sh`, self-signed, nie podpisany naszym CA,
-  dokładnie do tego scenariusza), annotation `proxy-ssl-verify: "on"` na ingress.
-- Demo: żądanie do Traefika powinno przejść (MITM niewykryty) na wersji podatnej,
-  i zostać odrzucone na załatanej.
-- Do zrobienia: zainstalować k3d, zdecydować dystrybucję configu (Helm chart Traefik
-  vs manifest YAML), sprawdzić czy ingress-nginx provider Traefika wymaga dodatkowej
-  flagi `--providers.kubernetesingress` czy osobnego CRD.
+### 3. CVE-2025-66491 (Traefik): działa end to end
+
+Klaster k3d (`tls-poc`, bez wbudowanego Traefika z k3s, `--k3s-arg
+"--disable=traefik@server:0"`). Manifesty w `manifests/`:
+- Namespace `tls-poc`.
+- Backend HTTPS: nginx z certyfikatem `untrusted.crt`/`untrusted.key` (self-signed,
+  NIE podpisany naszym CA, dokładnie rogue-backend do tego scenariusza).
+- RBAC (ServiceAccount + ClusterRole + ClusterRoleBinding) do watchowania
+  Ingress/Service/Secret itd.
+- Dwa Deploymenty Traefika: `traefik-vuln` (image `traefik:v3.6.2`) i
+  `traefik-patched` (image `traefik:v3.6.4` — `v3.6.3` zniknęło z Docker Hub, ale
+  3.6.4 ma ten sam fix). Oba z flagami
+  `--experimental.kubernetesingressnginx=true --providers.kubernetesingressnginx=true
+  --providers.kubernetesingressnginx.ingressclass=nginx`.
+- IngressClass `nginx` + Ingress z adnotacjami
+  `nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"` i
+  `nginx.ingress.kubernetes.io/proxy-ssl-verify: "on"`.
+
+`run-poc.sh` tworzy klaster (albo reużywa istniejący), aplikuje manifesty,
+portforwarduje obie wersje Traefika i strzela curlem z `Host: backend.local`.
+
+Zmierzone wyniki:
+- Vulnerable (3.6.2): `200 OK`, treść backendu dostaje się przez, czyli
+  weryfikacja certu faktycznie wyłączona mimo `proxy-ssl-verify: "on"`.
+- Patched (3.6.4): `500 Internal Server Error`, w logach Traefika
+  `tls: failed to verify certificate: x509: ...` — realna weryfikacja certyfikatu
+  faktycznie zachodzi i odrzuca rogue backend.
+
+Bug w kodzie Traefika potwierdzony z commita naprawczego (`pkg/provider/kubernetes/
+ingress-nginx/kubernetes.go`, linia z `InsecureSkipVerify: strings.ToLower(...) ==
+"on"` — dosłownie odwrócona logika).
+
+## Jedna komenda na wszystko
+```bash
+cd ~/tls-vuln-poc
+./demo.sh
+```
+Stawia (albo reużywa) wszystkie środowiska i odpala wszystkie trzy PoC po kolei,
+z czytelnymi nagłówkami. Bezpieczne do wielokrotnego odpalania.
 
 ## Następne kroki, w kolejności
 1. Dokończyć CVE-2025-23419: zdebugować dlaczego bypass się nie reprodukuje mimo
-   configu zgodnego z preconditions (patrz hipotezy wyżej).
-2. Dodać skrypt demo renegotiation dla CrateDB.
-3. Zainstalować k3d i zbudować lab Traefik.
-4. Poprawić CVSS Traefika w slajdach (8.2 na 5.9).
-5. Zrobić screenshoty/output z każdego demo na potrzeby raportu.
+   configu zgodnego z preconditions (patrz hipotezy wyżej). To jedyny z trzech,
+   który jeszcze nie daje efektu "podatna = przechodzi, załatana = blokuje".
+2. Zrobić screenshoty/output z każdego demo na potrzeby raportu.
 
 ## Decyzja użytkownika z 2026-10-21
 Zapytany, jak kontynuować przy zablokowanym PoC nginx, użytkownik wybrał dalsze

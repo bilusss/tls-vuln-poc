@@ -16,7 +16,15 @@ See `STATUS.md` for the current build/debug status of each lab.
 - Docker + Docker Compose
 - OpenSSL CLI
 - `keytool` / `java` (JDK, needed once to build CrateDB's Java keystore)
-- `k3d` (only for the Traefik lab, `brew install k3d`)
+- `k3d` + `kubectl` (only for the Traefik lab, `brew install k3d`)
+
+## One command
+
+```bash
+./demo.sh
+```
+Brings up (or reuses) all three environments and runs all three PoCs in sequence,
+vulnerable vs patched, with clear section headers. Safe to re-run.
 
 ## Quick start (per CVE)
 
@@ -40,12 +48,16 @@ openssl pkcs12 -export -in certs/server.crt -inkey certs/server.key -certfile ce
 keytool -importkeystore -srckeystore certs/keystore.p12 -srcstoretype PKCS12 -srcstorepass changeit \
   -destkeystore certs/keystore.jks -deststoretype JKS -deststorepass changeit -destkeypass changeit -noprompt
 docker compose up -d
-# vulnerable node:  https://127.0.0.1:4200
-# patched node:     https://127.0.0.1:4201
+./run-poc.sh cve-37309-vuln 4200      # fires renegotiations, watches CPU climb
+./run-poc.sh cve-37309-patched 4201   # same attack, server rejects it, CPU stays flat
 ```
 
 ### CVE-2025-66491, Traefik
-Not built yet. Needs a local k3d cluster. See `STATUS.md`.
+```bash
+cd cve-2025-66491-traefik
+../common/gen-certs.sh "$PWD/certs"
+./run-poc.sh   # creates/reuses a k3d cluster, deploys both Traefik builds, tests both
+```
 
 ## Why this is safe to share / run anywhere
 Every container binds only to `127.0.0.1`, so nothing is reachable from the network.
